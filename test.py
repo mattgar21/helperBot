@@ -5,8 +5,12 @@ import math
 import time
 
 # --- Camera FOVs (set to your webcam's specs if you know them) ---
-HFOV_DEG = 48.8   # common webcams: ~60–90°
+HFOV_DEG = 48.8
 VFOV_DEG = 28.6
+
+# --- Detection thresholds (on the *small* frame) ---
+MIN_VEST_AREA_FRAC = 0.02   # 2% of the small frame area
+MIN_VEST_FILL      = 0.45    # at least 45% of the bbox must be yellow
 
 def put_text_bottom_left(img, lines, margin=16, scale=0.7, thickness=2, color=(0,255,255)):
     """
@@ -85,54 +89,80 @@ def main():
             X = int(x * inv); Y = int(y * inv)
             W = int(ww * inv); H = int(hh * inv)
 
-
             # Confidence (fill ratio of mask in the box, computed on the small mask)
             roi_mask = mask[y:y+hh, x:x+ww]
             filled = float(cv2.countNonZero(roi_mask))
             box_area = max(ww * hh, 1)
             conf = np.clip(filled / box_area, 0.0, 1.0)
-            conf_smooth = (1 - alpha) * conf_smooth + alpha * conf
 
-            # Draw box
-            cv2.rectangle(out, (X, Y), (X+W, Y+H), (0,255,255), 3)
+            # ---- Magnitude gating: require enough yellow to count as a "vest" ----
+            small_area = float(mask.shape[0] * mask.shape[1])
+            area_frac  = (ww * hh) / small_area
+            passes_mag = (area_frac >= MIN_VEST_AREA_FRAC) and (conf >= MIN_VEST_FILL)
 
-            # Center of box (original scale)
-            cx = X + W/2.0
-            cy = Y + H/2.0
+            if not passes_mag:
+                # Treat as "no vest" this frame
+                conf_smooth = (1 - alpha) * conf_smooth
+                info_lines = [
+                    f"Vest: {int(conf_smooth*100)}%",
+                    "dx, dy (px):   0,   0  | dist: 0px",
+                    "dx, dy (norm): +0.000, +0.000",
+                    "angle X,Y: +0.00°, +0.00°",
+                    "center X in box: False",
+                    "center inside box: False",
+                    f"(filtered: area {area_frac:.3%} < {MIN_VEST_AREA_FRAC:.3%} "
+                    f"or fill {conf:.2f} < {MIN_VEST_FILL:.2f})"
+                ]
+            else:
+                # Update smoothed confidence only when we actually accept the detection
+                conf_smooth = (1 - alpha) * conf_smooth + alpha * conf
 
-            # Vector from image center to target
-            dx_px = cx - img_cx
-            dy_px = cy - img_cy
-            dist_px = math.hypot(dx_px, dy_px)
+                # Draw box
+                cv2.rectangle(out, (X, Y), (X+W, Y+H), (0,255,255), 3)
 
-            # Normalized offsets (–1..1 at image edges)
-            nx = dx_px / (W_img/2.0)
-            ny = dy_px / (H_img/2.0)
+                # Center of box (original scale)
+                cx = X + W/2.0
+                cy = Y + H/2.0
 
-            # Angular offsets from FOV
-            ang_x_deg = nx * (HFOV_DEG / 2.0)
-            ang_y_deg = ny * (VFOV_DEG / 2.0)
+                # Vector from image center to target
+                dx_px = cx - img_cx
+                dy_px = cy - img_cy
+                dist_px = math.hypot(dx_px, dy_px)
 
-            # Draw center-to-target line and target dot
-            cv2.line(out, (int(img_cx), int(img_cy)), (int(cx), int(cy)), (0,255,255), 2)
-            cv2.circle(out, (int(cx), int(cy)), 5, (0,255,255), -1)
+                # Normalized offsets (–1..1 at image edges)
+                nx = dx_px / (W_img/2.0)
+                ny = dy_px / (H_img/2.0)
 
-            # --- Flags: is the image center inside the box? ---
-            center_aligned_x = (X <= img_cx <= X + W)
-            center_aligned_y = (Y <= img_cy <= Y + H)
-            center_inside_vest = center_aligned_x and center_aligned_y
+                # Angular offsets from FOV
+                ang_x_deg = nx * (HFOV_DEG / 2.0)
+                ang_y_deg = ny * (VFOV_DEG / 2.0)
 
-            # Bottom-left HUD
-            info_lines = [
-                f"Vest: {int(conf_smooth*100)}%",
-                f"dx, dy (px): {dx_px:+.0f}, {dy_px:+.0f}  | dist: {dist_px:.0f}px",
-                f"dx, dy (norm): {nx:+.3f}, {ny:+.3f}",
-                f"angle X,Y: {ang_x_deg:+.2f}\u00b0, {ang_y_deg:+.2f}\u00b0",
-                f"center X in box: {center_aligned_x}",
-                f"center inside box: {center_inside_vest}"
-            ]
+                # Draw center-to-target line and target dot
+                cv2.line(out, (int(img_cx), int(img_cy)), (int(cx), int(cy)), (0,255,255), 2)
+                cv2.circle(out, (int(cx), int(cy)), 5, (0,255,255), -1)
+
+                # --- Flags: is the image center inside the box? ---
+                center_aligned_x = (X <= img_cx <= X + W)
+                center_aligned_y = (Y <= img_cy <= Y + H)
+                center_inside_vest = center_aligned_x and center_aligned_y
+
+                # Bottom-left HUD
+                info_lines = [
+                    f"Vest: {int(conf_smooth*100)}%",
+                    f"dx, dy (px): {dx_px:+.0f}, {dy_px:+.0f}  | dist: {dist_px:.0f}px",
+                    f"dx, dy (norm): {nx:+.3f}, {ny:+.3f}",
+                    f"angle X,Y: {ang_x_deg:+.2f}\u00b0, {ang_y_deg:+.2f}\u00b0",
+                    f"center X in box: {center_aligned_x}",
+                    f"center inside box: {center_inside_vest}",
+                    f"[area {area_frac:.3%} | fill {conf:.2f}]"
+                ]
         else:
             conf_smooth = (1 - alpha) * conf_smooth
+            # Reset flags when no vest candidate at all
+            center_aligned_x = False
+            center_aligned_y = False
+            center_inside_vest = False
+
             info_lines = [
                 f"Vest: {int(conf_smooth*100)}%",
                 "dx, dy (px):   0,   0  | dist: 0px",

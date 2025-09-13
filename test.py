@@ -25,7 +25,7 @@ def put_text_bottom_left(img, lines, margin=16, scale=0.7, thickness=2, color=(0
         y -= (th + baseline + 6)
 
 def main():
-    cap = cv2.VideoCapture(1)  # <-- change index if needed (0,1,2...)
+    cap = cv2.VideoCapture(0)  # <-- change index if needed (0,1,2...)
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam. Try a different index (0/1/2) or check permissions.")
 

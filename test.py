@@ -4,7 +4,10 @@ import numpy as np
 import time
 
 def main():
-    cap = cv2.VideoCapture(1)  # change to 1/2 if you have multiple cameras
+    print("Started")
+    cap = cv2.VideoCapture(1)  # replace 1 with the working index
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280) 
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam. Try a different index (1, 2) or check permissions.")
 
@@ -18,7 +21,7 @@ def main():
     # Use an exponential moving average to smooth confidence readout
     conf_smooth = 0.0
     alpha = 0.2
-
+    print("Entering main loop")
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -75,6 +78,64 @@ def main():
             conf = np.clip(filled / box_area, 0.0, 1.0)
             conf_smooth = (1 - alpha) * conf_smooth + alpha * conf
 
+            print("Distance from center")
+            """
+            Determining the distance from the center of the camera
+            """
+            import math
+
+            # Assume you already have: out (original frame), and X,Y,W,H for the box
+            H_img, W_img = out.shape[:2]
+
+            # 1) Centers
+            cx = X + W/2.0
+            cy = Y + H/2.0
+            img_cx = W_img/2.0
+            img_cy = H_img/2.0
+
+            # 2) Pixel offsets (positive dx = right of center, positive dy = below center)
+            dx_px = cx - img_cx
+            dy_px = cy - img_cy
+            dist_px = math.hypot(dx_px, dy_px)
+
+            # 3) Normalized offsets (–1..1, independent of resolution)
+            nx = dx_px / (W_img/2.0)
+            ny = dy_px / (H_img/2.0)
+
+            # 4a) Angular offsets using FIELD OF VIEW (easy method)
+            # Set your camera FOVs (check spec sheet; common values: hfov≈70°, vfov≈43°)
+            HFOV_DEG = 70.0
+            VFOV_DEG = 43.0
+            ang_x_deg = nx * (HFOV_DEG / 2.0)
+            ang_y_deg = ny * (VFOV_DEG / 2.0)
+
+            # 4b) (Optional, more accurate) Using intrinsics fx, fy if you calibrated the camera:
+            # fx, fy = ...  # focal length in pixels from calibration
+            # ang_x_deg = math.degrees(math.atan2(dx_px, fx))
+            # ang_y_deg = math.degrees(math.atan2(dy_px, fy))
+
+            # Draw a crosshair at image center and at box center
+            cv2.drawMarker(out, (int(img_cx), int(img_cy)), (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+            cv2.circle(out, (int(cx), int(cy)), 5, (0, 255, 255), -1)
+
+            # Visual line from center to target
+            cv2.line(out, (int(img_cx), int(img_cy)), (int(cx), int(cy)), (0, 255, 255), 2)
+
+            # Overlay readout
+            info = [
+                f"dx, dy (px): {dx_px:+.0f}, {dy_px:+.0f}  | dist: {dist_px:.0f}px",
+                f"dx, dy (norm): {nx:+.3f}, {ny:+.3f}",
+                f"angle X,Y: {ang_x_deg:+.2f}°, {ang_y_deg:+.2f}°"
+            ]
+            y0 = 30
+            for i, t in enumerate(info):
+                cv2.putText(out, t, (20, y0 + i*28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+
+            """
+            End
+            """
+            print("Drawing box")
             # Draw
             cv2.rectangle(out, (X, Y), (X + W, Y + H), (0, 255, 255), 3)
             label = f"Vest: {int(conf_smooth*100)}%"
@@ -90,6 +151,7 @@ def main():
         mask_vis = cv2.resize(mask_vis, (out.shape[1]//4, out.shape[0]//4))
         out[0:mask_vis.shape[0], 0:mask_vis.shape[1]] = mask_vis
 
+        print("Showing camera pov")
         cv2.imshow("Yellow Vest Tracker (press q to quit)", out)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):

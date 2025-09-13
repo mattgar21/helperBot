@@ -9,8 +9,8 @@ HFOV_DEG = 48.8
 VFOV_DEG = 28.6
 
 # --- Detection thresholds (on the *small* frame) ---
-MIN_VEST_AREA_FRAC = 0.02   # 2% of the small frame area
-MIN_VEST_FILL      = 0.45    # at least 45% of the bbox must be yellow
+MIN_VEST_AREA_FRAC = 0.008   # 0.8% of the small frame area
+MIN_VEST_FILL      = 0.15    # at least 15% of the bbox must be yellow
 
 def put_text_bottom_left(img, lines, margin=16, scale=0.7, thickness=2, color=(0,255,255)):
     """

@@ -25,6 +25,13 @@
     .speed { margin-top: 4px; font-size:14px; opacity:.85; }
     input[type=range] { width: 240px; }
     footer { opacity:.6; font-size:12px; margin-top:12px; }
+    #cam {
+      max-width:95vw;
+      width:640px;
+      margin-top:16px;
+      border-radius:8px;
+      border:1px solid #3a3f4b;
+    }
   </style>
 </head>
 <body>
@@ -51,98 +58,100 @@
     <button id="stop" class="stop">STOP</button>
   </div>
 
+  <!-- Camera feed from Flask /video -->
+  <div>
+    <img id="cam" src="/video" alt="Camera feed with overlays">
+  </div>
+
   <footer>Press & hold to move. Releasing, switching tabs, or closing will STOP.</footer>
 
-    <script>
-        const btns = {
-            forward: document.getElementById("forward"),
-            backward: document.getElementById("backward"),
-            left: document.getElementById("left"),
-            right: document.getElementById("right"),
-            stop: document.getElementById("stop"),
-        };
-        const speed = document.getElementById("speed");
-        const speedVal = document.getElementById("speedVal");
+  <script>
+    const btns = {
+      forward: document.getElementById("forward"),
+      backward: document.getElementById("backward"),
+      left: document.getElementById("left"),
+      right: document.getElementById("right"),
+      stop: document.getElementById("stop"),
+    };
+    const speed = document.getElementById("speed");
+    const speedVal = document.getElementById("speedVal");
 
-        let active = null;
-        let inFlight = false;
+    let active = null;
+    let inFlight = false;
 
-        function api(path, payload={}) {
-            return fetch(path, {
-            method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify(payload)
-            });
-        }
+    function api(path, payload={}) {
+      return fetch(path, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload)
+      });
+    }
 
-        function start(dir) {
-            if (inFlight && active === dir) return;
-            inFlight = true;
-            active = dir;
-            for (const k in btns) btns[k].classList.remove("active");
-            if (btns[dir]) btns[dir].classList.add("active");
-            api("/control", {direction: dir, state: "start", speed: Number(speed.value)})
-            .finally(()=>{ inFlight = false; });
-        }
+    function start(dir) {
+      if (inFlight && active === dir) return;
+      inFlight = true;
+      active = dir;
+      for (const k in btns) btns[k].classList.remove("active");
+      if (btns[dir]) btns[dir].classList.add("active");
+      api("/control", {direction: dir, state: "start", speed: Number(speed.value)})
+        .finally(()=>{ inFlight = false; });
+    }
 
-        function stopAll() {
-            active = null;
-            for (const k in btns) btns[k].classList.remove("active");
-            api("/control", {state: "stop"});
-        }
+    function stopAll() {
+      active = null;
+      for (const k in btns) btns[k].classList.remove("active");
+      api("/control", {state: "stop"});
+    }
 
-        function bindPressAndHold(el, dir) {
-            const down = (e) => { e.preventDefault(); start(dir); };
-            const up   = (e) => { e.preventDefault(); if (active === dir) stopAll(); };
-            el.addEventListener("pointerdown", down);
-            window.addEventListener("pointerup", up);
-            window.addEventListener("pointercancel", up);
-        }
+    function bindPressAndHold(el, dir) {
+      const down = (e) => { e.preventDefault(); start(dir); };
+      const up   = (e) => { e.preventDefault(); if (active === dir) stopAll(); };
+      el.addEventListener("pointerdown", down);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    }
 
-        // Attach mouse/touch handlers
-        bindPressAndHold(btns.forward, "forward");
-        bindPressAndHold(btns.backward, "backward");
-        bindPressAndHold(btns.left, "left");
-        bindPressAndHold(btns.right, "right");
+    bindPressAndHold(btns.forward, "forward");
+    bindPressAndHold(btns.backward, "backward");
+    bindPressAndHold(btns.left, "left");
+    bindPressAndHold(btns.right, "right");
 
-        btns.stop.addEventListener("click", (e)=>{ e.preventDefault(); stopAll(); });
+    btns.stop.addEventListener("click", (e)=>{ e.preventDefault(); stopAll(); });
 
-        // --------- NEW: Keyboard bindings ---------
-        const keyMap = {
-            "w": "forward", "ArrowUp": "forward",
-            "a": "left",    "ArrowLeft": "left",
-            "s": "backward","ArrowDown": "backward",
-            "d": "right",   "ArrowRight": "right",
-            " ": "stop" // space bar = stop
-        };
+    const keyMap = {
+      "w": "forward", "ArrowUp": "forward",
+      "a": "left",    "ArrowLeft": "left",
+      "s": "backward","ArrowDown": "backward",
+      "d": "right",   "ArrowRight": "right",
+      " ": "stop"
+    };
 
-        document.addEventListener("keydown", (e) => {
-            const dir = keyMap[e.key];
-            if (dir && !active) {
-            if (dir === "stop") stopAll();
-            else start(dir);
-            e.preventDefault();
-            }
-        });
+    document.addEventListener("keydown", (e) => {
+      const dir = keyMap[e.key];
+      if (dir && !active) {
+        if (dir === "stop") stopAll();
+        else start(dir);
+        e.preventDefault();
+      }
+    });
 
-        document.addEventListener("keyup", (e) => {
-            const dir = keyMap[e.key];
-            if (dir && dir !== "stop" && active === dir) {
-            stopAll();
-            e.preventDefault();
-            }
-        });
-        // ------------------------------------------
+    document.addEventListener("keyup", (e) => {
+      const dir = keyMap[e.key];
+      if (dir && dir !== "stop" && active === dir) {
+        stopAll();
+        e.preventDefault();
+      }
+    });
 
-        document.addEventListener("visibilitychange", ()=> {
-            if (document.hidden) stopAll();
-        });
-        window.addEventListener("beforeunload", stopAll);
+    document.addEventListener("visibilitychange", ()=> {
+      if (document.hidden) stopAll();
+    });
+    window.addEventListener("beforeunload", stopAll);
 
-        speed.addEventListener("input", ()=>{
-            speedVal.textContent = speed.value;
-            if (active) api("/control", {direction: active, state: "start", speed: Number(speed.value)});
-        });
-    </script>
+    speed.addEventListener("input", ()=>{
+      speedVal.textContent = speed.value;
+      if (active) api("/control", {direction: active, state: "start", speed: Number(speed.value)});
+    });
+  </script>
 </body>
 </html>

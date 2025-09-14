@@ -21,10 +21,11 @@ TARGET_DEADBAND  = 0.010
 # --- Controller tuning ---
 K_TURN = 0.035
 TURN_DEADBAND_DEG = 2.0
-K_FWD_SERVER  = 2.5
-MIN_FWD_CMD   = 0.25
-MAX_FWD_CMD   = 1.0
+
 MAX_TURN_CMD = 0.65
+K_FWD_SERVER  = 4.0     # (unused now for forward; kept for reference)
+MIN_FWD_CMD   = 0.35
+MAX_FWD_CMD   = 1.30
 
 SEARCH_TURN_CMD = 0.35
 SEARCH_BURST_S  = 0.4
@@ -177,20 +178,33 @@ def main():
         nx = dx_px / (W_img/2.0)
         ang_x_deg = nx * (HFOV_DEG / 2.0)
 
-        # distance proxy via area
-        area_err = (TARGET_AREA_FRAC - area_frac)
-
-        # turning
+        # ---------- TURNING ----------
         if abs(ang_x_deg) <= TURN_DEADBAND_DEG:
             turn_cmd = 0.0
         else:
             turn_cmd = float(np.clip(K_TURN * ang_x_deg, -MAX_TURN_CMD, MAX_TURN_CMD))
 
-        # forward
+        # ---------- FORWARD: Y-based speed ----------
+        # Lower in the image (higher cy) => faster forward.
+        # Optional: if already "close" by area, stop.
         if area_frac >= (TARGET_AREA_FRAC - TARGET_DEADBAND):
             fwd_cmd = 0.0
-        else: #was K_FWD 
-            fwd_cmd = float(np.clip(K_FWD_SERVER * area_err, MIN_FWD_CMD, MAX_FWD_CMD))
+        else:
+            # y_pos in [0..1]: 0=top, 1=bottom
+            y_pos = float(np.clip(cy / H_img, 0.0, 1.0))
+
+            # Nonlinear curve to bias more speed as it gets lower
+            GAMMA_Y = 1.2
+            fwd_cmd = MIN_FWD_CMD + (MAX_FWD_CMD - MIN_FWD_CMD) * (y_pos ** GAMMA_Y)
+
+            # Small boost when roughly centered so straight runs feel punchy
+            if abs(ang_x_deg) < 5.0:
+                fwd_cmd = min(fwd_cmd + 0.10, MAX_FWD_CMD)
+
+            # Hard stop very near the bottom to avoid collision
+            BOTTOM_STOP_FRAC = 0.90  # 90% down the frame
+            if y_pos >= BOTTOM_STOP_FRAC:
+                fwd_cmd = 0.0
 
         left_cmd  = fwd_cmd + turn_cmd
         right_cmd = fwd_cmd - turn_cmd
@@ -200,6 +214,7 @@ def main():
             f"Vest: {int(conf_smooth*100)}%",
             f"angle X: {ang_x_deg:+.2f}°",
             f"area: {area_frac:.3%} (target {TARGET_AREA_FRAC:.1%})",
+            f"y_pos: {cy/H_img:.2f}",
             f"cmd L,R: {left_cmd:+.2f}, {right_cmd:+.2f}"
         ]
         put_text_bottom_left(out, hud)

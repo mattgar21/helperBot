@@ -2,7 +2,10 @@
 from flask import Flask, request, jsonify, send_from_directory, abort, Response
 import atexit, time, threading
 
-# ------- Motor setup (gpiozero + lgpio) -------
+# ------- Motor setup (gpiozero + your PWM source) -------
+# If you want steadier PWM, consider pigpio:
+# from gpiozero.pins.pigpio import PiGPIOFactory
+# Device.pin_factory = PiGPIOFactory()  # requires pigpiod
 from gpiozero.pins.lgpio import LGPIOFactory
 from gpiozero import Device, Motor
 Device.pin_factory = LGPIOFactory()
@@ -14,7 +17,8 @@ IN3 = 22   # Right backward
 IN4 = 10   # Right forward
 EN1 = 9    # Left enable (PWM)
 EN2 = 11   # Right enable (PWM)
-PWM_FREQ = 1000
+
+PWM_FREQ = 60  # Hz per your hardware
 
 left_motor  = Motor(forward=IN1, backward=IN2, enable=EN1, pwm=True)
 right_motor = Motor(forward=IN4, backward=IN3, enable=EN2, pwm=True)
@@ -46,7 +50,9 @@ def right(pct):
     left_motor.forward(s); right_motor.backward(s)
 
 def tank(lc, rc):
-    # lc/rc in [-1..+1]
+    """
+    lc/rc in [-1..+1] duty. This clamps and applies sign to both motors.
+    """
     lc = max(-1.0, min(1.0, float(lc)))
     rc = max(-1.0, min(1.0, float(rc)))
     if lc >= 0: left_motor.forward(_clamp01(lc))
@@ -116,29 +122,26 @@ def get_latest_frame():
 # --------------------------------------
 
 # --------- SERVER-SIDE FOLLOW TUNING ---------
-# Turning (common for all modes)
+# Turning (common)
 K_TURN_SERVER      = 0.035   # deg -> turn command
-TURN_DEADBAND_DEG  = 2.0     # ignore tiny angle errors
+TURN_DEADBAND_DEG  = 2.0
 STEER_SIGN         = +1.0    # set to -1.0 if steering is inverted
 MAX_TURN_CMD       = 0.65
 
 # Forward from Y position (preferred if provided by client)
-TARGET_Y_NORM      = 0.35    # stop when box center is ~35% from top (0=top, 1=bottom)
-Y_DEADBAND         = 0.05    # ±5% deadband around target Y
-K_FWD_Y_SERVER     = 2.2     # gain for y-based control
-MIN_FWD_CMD        = 0.18
-MAX_FWD_CMD        = 1.00
+# 0.0 = top, 1.0 = bottom. We move forward at FULL DUTY when below this band.
+TARGET_Y_NORM      = 0.35
+Y_DEADBAND         = 0.05
 
-# Legacy forward from area (fallback if only area_frac is sent)
+# Legacy forward from area (fallback, full duty when too small)
 TARGET_AREA_FRAC   = 0.050
 TARGET_DEADBAND    = 0.010
-K_FWD_SERVER       = 1.6
 # ---------------------------------------------------
 
 # ---------------- Routes ----------------
 @app.route("/")
 def index():
-    # Serve your HTML verbatim
+    # Serve your HTML
     return send_from_directory(".", "index.html")
 
 @app.route("/status")
@@ -151,7 +154,7 @@ def control():
     j = request.get_json(silent=True) or {}
     state = j.get("state")
     direction = j.get("direction")
-    speed = int(j.get("speed", 70))
+    speed = int(j.get("speed", 100))  # UI passes 30..100; manual honors it
 
     _set_mode("manual")
 
@@ -165,7 +168,7 @@ def control():
 
     if state == "stop":
         stop(); _set_moving("stop")
-        _set_mode("auto")  # return to auto
+        _set_mode("auto")  # return to auto so vision can resume
         return jsonify(ok=True, **_snapshot())
 
     abort(400, "Invalid state")
@@ -179,7 +182,7 @@ def vision_control():
 
     j = request.get_json(silent=True) or {}
 
-    # --- PRIORITY 1: raw tank commands (back-compat) ---
+    # --- PRIORITY 1: raw tank commands (unchanged/back-compat) ---
     if "left_cmd" in j and "right_cmd" in j:
         lc = float(j["left_cmd"]); rc = float(j["right_cmd"])
         tank(lc, rc)
@@ -187,7 +190,7 @@ def vision_control():
         _touch_vision()
         return jsonify(ok=True, **_snapshot())
 
-    # --- PRIORITY 2: server-side follow from measurements ---
+    # --- PRIORITY 2: measurements for server-side chase ---
     # Inputs we may receive:
     # ang_x_deg: horizontal angle error (deg, +right/-left)
     # y_norm:    vertical center normalized [0..1] (0=top, 1=bottom)
@@ -196,13 +199,13 @@ def vision_control():
 
     ang_x_deg = float(j.get("ang_x_deg", 0.0))
 
-    # compute turn
+    # TURN: proportional with deadband, sign-corrected
     if abs(ang_x_deg) <= TURN_DEADBAND_DEG:
         turn_cmd = 0.0
     else:
         turn_cmd = max(-MAX_TURN_CMD, min(MAX_TURN_CMD, STEER_SIGN * K_TURN_SERVER * ang_x_deg))
 
-    # figure out y_norm if provided
+    # Determine y_norm if provided (preferred)
     y_norm = None
     if "y_norm" in j:
         try:
@@ -215,35 +218,38 @@ def vision_control():
         if H_img > 0:
             y_norm = max(0.0, min(1.0, cy / H_img))
 
-    fwd_cmd = 0.0
+    # ---- NEW: forward = "manual max" when moving forward ----
+    # We emulate your web-app at 100%: if we decide to move forward, we use full duty (1.0).
+    fwd_full = 1.0
+    fwd_cmd  = 0.0
+    method   = "turnOnly"
 
     if y_norm is not None:
-        # --- Preferred: Y-based forward control ---
-        # If already near/above the target band (close to top), stop; else drive forward.
-        if y_norm <= (TARGET_Y_NORM - Y_DEADBAND):
-            fwd_cmd = 0.0
+        # If the box center is below the target band (middle/bottom), go FULL forward.
+        if y_norm > (TARGET_Y_NORM - Y_DEADBAND):
+            fwd_cmd = fwd_full
         else:
-            y_err = y_norm - TARGET_Y_NORM
-            fwd_cmd = max(MIN_FWD_CMD, min(MAX_FWD_CMD, K_FWD_Y_SERVER * y_err))
+            fwd_cmd = 0.0
         method = f"followY(y_norm={y_norm:.2f})"
-    elif "area_frac" in j:
-        # --- Fallback: Area-based forward control (legacy) ---
-        area_frac = float(j.get("area_frac", 0.0))
-        if area_frac >= (TARGET_AREA_FRAC - TARGET_DEADBAND):
-            fwd_cmd = 0.0
-        else:
-            area_err = TARGET_AREA_FRAC - area_frac
-            fwd_cmd = max(MIN_FWD_CMD, min(MAX_FWD_CMD, K_FWD_SERVER * area_err))
-        method = f"followArea(area={area_frac:.3f})"
-    else:
-        # Only turning data; no forward motion.
-        method = "turnOnly"
 
-    # Mix tank
+    elif "area_frac" in j:
+        # Legacy area-based: if target looks too small, go FULL forward.
+        area_frac = float(j.get("area_frac", 0.0))
+        if area_frac < (TARGET_AREA_FRAC - TARGET_DEADBAND):
+            fwd_cmd = fwd_full
+        else:
+            fwd_cmd = 0.0
+        method = f"followArea(area={area_frac:.3f})"
+
+    # Mix: forward at full duty when needed, plus turning authority
     lc = fwd_cmd - turn_cmd
     rc = fwd_cmd + turn_cmd
+    # Clamp just in case
+    lc = max(-1.0, min(1.0, lc))
+    rc = max(-1.0, min(1.0, rc))
+
     tank(lc, rc)
-    _set_moving(f"auto {method} l={lc:.2f}, r={rc:.2f}, ang={ang_x_deg:.2f}")
+    _set_moving(f"auto {method} l={lc:.2f}, r={rc:.2f}, ang={ang_x_deg:.2f}, fwd={'1.0' if fwd_cmd>0 else '0.0'}")
     _touch_vision()
     return jsonify(ok=True, **_snapshot())
 
@@ -274,6 +280,6 @@ def video():
 # ---------------------------------------------
 
 if __name__ == "__main__":
-    # If you rely on pigpio daemon for timing:
+    # If you switch to pigpio timing for steadier PWM:
     # sudo systemctl enable --now pigpiod
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)

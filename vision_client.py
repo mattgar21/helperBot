@@ -192,8 +192,8 @@ def main():
         else:
             fwd_cmd = float(np.clip(K_FWD * area_err, MIN_FWD_CMD, MAX_FWD_CMD))
 
-        left_cmd  = fwd_cmd - turn_cmd
-        right_cmd = fwd_cmd + turn_cmd
+        left_cmd  = fwd_cmd + turn_cmd
+        right_cmd = fwd_cmd - turn_cmd
         post_vision(left_cmd=left_cmd, right_cmd=right_cmd)
 
         hud = [

@@ -1,4 +1,3 @@
-# track_yellow_vest_angles_bottomleft.py
 import cv2
 import numpy as np
 import math

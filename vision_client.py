@@ -21,9 +21,9 @@ TARGET_DEADBAND  = 0.010
 # --- Controller tuning ---
 K_TURN = 0.035
 TURN_DEADBAND_DEG = 2.0
-K_FWD = 1.6
-MIN_FWD_CMD = 0.18
-MAX_FWD_CMD = 0.70
+K_FWD_SERVER  = 2.5
+MIN_FWD_CMD   = 0.25
+MAX_FWD_CMD   = 1.0
 MAX_TURN_CMD = 0.65
 
 SEARCH_TURN_CMD = 0.35
@@ -189,8 +189,8 @@ def main():
         # forward
         if area_frac >= (TARGET_AREA_FRAC - TARGET_DEADBAND):
             fwd_cmd = 0.0
-        else:
-            fwd_cmd = float(np.clip(K_FWD * area_err, MIN_FWD_CMD, MAX_FWD_CMD))
+        else: #was K_FWD 
+            fwd_cmd = float(np.clip(K_FWD_SERVER * area_err, MIN_FWD_CMD, MAX_FWD_CMD))
 
         left_cmd  = fwd_cmd + turn_cmd
         right_cmd = fwd_cmd - turn_cmd

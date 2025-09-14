@@ -115,6 +115,18 @@ def get_latest_frame():
         return _latest_frame
 # --------------------------------------
 
+# --------- SERVER-SIDE FOLLOW TUNING ---------
+TARGET_AREA_FRAC   = 0.050   # stop distance proxy (approx 5% of frame area)
+TARGET_DEADBAND    = 0.010   # ±1% deadband around target size
+K_TURN_SERVER      = 0.035   # deg -> turn command
+TURN_DEADBAND_DEG  = 2.0     # ignore tiny angle errors
+STEER_SIGN         = +1.0    # set to -1.0 if steering is inverted
+K_FWD_SERVER       = 1.6     # area error -> forward command
+MIN_FWD_CMD        = 0.18
+MAX_FWD_CMD        = 0.70
+MAX_TURN_CMD       = 0.65
+# ---------------------------------------------------
+
 # ---------------- Routes ----------------
 @app.route("/")
 def index():
@@ -125,7 +137,7 @@ def index():
 def status():
     return jsonify(ok=True, **_snapshot())
 
-# Your page uses /control. Any call here = MANUAL override.
+# Any call here = MANUAL override.
 @app.route("/control", methods=["POST"])
 def control():
     j = request.get_json(silent=True) or {}
@@ -145,13 +157,12 @@ def control():
 
     if state == "stop":
         stop(); _set_moving("stop")
-        # Return to AUTO so camera can resume immediately
-        _set_mode("auto")
+        _set_mode("auto")  # return to auto
         return jsonify(ok=True, **_snapshot())
 
     abort(400, "Invalid state")
 
-# Camera client posts tank commands here; ignored while in MANUAL
+# Camera client posts commands or measurements here; ignored in MANUAL
 @app.route("/vision_control", methods=["POST"])
 def vision_control():
     snap = _snapshot()
@@ -159,25 +170,50 @@ def vision_control():
         return jsonify(ok=False, reason="manual_override"), 409
 
     j = request.get_json(silent=True) or {}
+
+    # --- PRIORITY 1: raw tank commands ---
+    if "left_cmd" in j and "right_cmd" in j:
+        lc = float(j["left_cmd"]); rc = float(j["right_cmd"])
+        tank(lc, rc)
+        _set_moving(f"auto tank({lc:.2f},{rc:.2f})")
+        _touch_vision()
+        return jsonify(ok=True, **_snapshot())
+
+    # --- PRIORITY 2: measurements for server-side chase ---
+    if ("ang_x_deg" in j) or ("area_frac" in j):
+        ang_x_deg  = float(j.get("ang_x_deg", 0.0))
+        area_frac  = float(j.get("area_frac", 0.0))
+
+        # Turning
+        if abs(ang_x_deg) <= TURN_DEADBAND_DEG:
+            turn_cmd = 0.0
+        else:
+            turn_cmd = max(-MAX_TURN_CMD, min(MAX_TURN_CMD, STEER_SIGN * K_TURN_SERVER * ang_x_deg))
+
+        # Forward
+        if area_frac >= (TARGET_AREA_FRAC - TARGET_DEADBAND):
+            fwd_cmd = 0.0
+        else:
+            area_err = TARGET_AREA_FRAC - area_frac
+            fwd_cmd = max(MIN_FWD_CMD, min(MAX_FWD_CMD, K_FWD_SERVER * area_err))
+
+        # Mix tank
+        lc = fwd_cmd - turn_cmd
+        rc = fwd_cmd + turn_cmd
+        tank(lc, rc)
+        _set_moving(f"auto follow(l={lc:.2f},r={rc:.2f}; area={area_frac:.3f}, ang={ang_x_deg:.2f})")
+        _touch_vision()
+        return jsonify(ok=True, **_snapshot())
+
     if j.get("state") == "stop":
         stop(); _set_moving("stop"); _touch_vision()
         return jsonify(ok=True, **_snapshot())
 
-    if "left_cmd" in j and "right_cmd" in j:
-        tank(j["left_cmd"], j["right_cmd"])
-        _set_moving(f"auto tank({j['left_cmd']:.2f},{j['right_cmd']:.2f})")
-        _touch_vision()
-        return jsonify(ok=True, **_snapshot())
-
     abort(400, "Missing or invalid vision command")
 
-# ----- NEW: frame ingest + MJPEG stream -----
+# ----- frame ingest + MJPEG stream -----
 @app.route("/frame", methods=["POST"])
 def receive_frame():
-    """
-    Vision client posts a single JPEG here (Content-Type: image/jpeg).
-    We store only the most recent frame.
-    """
     data = request.get_data(cache=False, as_text=False)
     if not data:
         abort(400, "empty")
@@ -186,12 +222,7 @@ def receive_frame():
 
 @app.route("/video")
 def video():
-    """
-    MJPEG stream of the most recent frames at /video.
-    Your HTML can simply use: <img src="/video">
-    """
     boundary = b"--frame"
-
     def gen():
         while True:
             jf = get_latest_frame()
@@ -202,9 +233,7 @@ def video():
             yield b"Content-Type: image/jpeg\r\n"
             yield f"Content-Length: {len(jf)}\r\n\r\n".encode("ascii")
             yield jf + b"\r\n"
-            # throttle a bit; effective rate is driven by how fast vision posts
             time.sleep(0.03)
-
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 # ---------------------------------------------
 

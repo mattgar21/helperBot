@@ -116,15 +116,23 @@ def get_latest_frame():
 # --------------------------------------
 
 # --------- SERVER-SIDE FOLLOW TUNING ---------
-TARGET_AREA_FRAC   = 0.050   # stop distance proxy (approx 5% of frame area)
-TARGET_DEADBAND    = 0.010   # ±1% deadband around target size
+# Turning (common for all modes)
 K_TURN_SERVER      = 0.035   # deg -> turn command
 TURN_DEADBAND_DEG  = 2.0     # ignore tiny angle errors
 STEER_SIGN         = +1.0    # set to -1.0 if steering is inverted
-K_FWD_SERVER       = 1.6     # area error -> forward command
-MIN_FWD_CMD        = 0.18
-MAX_FWD_CMD        = 0.70
 MAX_TURN_CMD       = 0.65
+
+# Forward from Y position (preferred if provided by client)
+TARGET_Y_NORM      = 0.35    # stop when box center is ~35% from top (0=top, 1=bottom)
+Y_DEADBAND         = 0.05    # ±5% deadband around target Y
+K_FWD_Y_SERVER     = 2.2     # gain for y-based control
+MIN_FWD_CMD        = 0.18
+MAX_FWD_CMD        = 1.00
+
+# Legacy forward from area (fallback if only area_frac is sent)
+TARGET_AREA_FRAC   = 0.050
+TARGET_DEADBAND    = 0.010
+K_FWD_SERVER       = 1.6
 # ---------------------------------------------------
 
 # ---------------- Routes ----------------
@@ -171,7 +179,7 @@ def vision_control():
 
     j = request.get_json(silent=True) or {}
 
-    # --- PRIORITY 1: raw tank commands ---
+    # --- PRIORITY 1: raw tank commands (back-compat) ---
     if "left_cmd" in j and "right_cmd" in j:
         lc = float(j["left_cmd"]); rc = float(j["right_cmd"])
         tank(lc, rc)
@@ -179,37 +187,65 @@ def vision_control():
         _touch_vision()
         return jsonify(ok=True, **_snapshot())
 
-    # --- PRIORITY 2: measurements for server-side chase ---
-    if ("ang_x_deg" in j) or ("area_frac" in j):
-        ang_x_deg  = float(j.get("ang_x_deg", 0.0))
-        area_frac  = float(j.get("area_frac", 0.0))
+    # --- PRIORITY 2: server-side follow from measurements ---
+    # Inputs we may receive:
+    # ang_x_deg: horizontal angle error (deg, +right/-left)
+    # y_norm:    vertical center normalized [0..1] (0=top, 1=bottom)
+    # or cy + H_img (or H) to compute y_norm = cy / H_img
+    # area_frac: optional legacy distance proxy (fallback)
 
-        # Turning
-        if abs(ang_x_deg) <= TURN_DEADBAND_DEG:
-            turn_cmd = 0.0
+    ang_x_deg = float(j.get("ang_x_deg", 0.0))
+
+    # compute turn
+    if abs(ang_x_deg) <= TURN_DEADBAND_DEG:
+        turn_cmd = 0.0
+    else:
+        turn_cmd = max(-MAX_TURN_CMD, min(MAX_TURN_CMD, STEER_SIGN * K_TURN_SERVER * ang_x_deg))
+
+    # figure out y_norm if provided
+    y_norm = None
+    if "y_norm" in j:
+        try:
+            y_norm = float(j["y_norm"])
+        except Exception:
+            y_norm = None
+    elif "cy" in j:
+        cy = float(j["cy"])
+        H_img = float(j.get("H_img", j.get("H", 0.0)))
+        if H_img > 0:
+            y_norm = max(0.0, min(1.0, cy / H_img))
+
+    fwd_cmd = 0.0
+
+    if y_norm is not None:
+        # --- Preferred: Y-based forward control ---
+        # If already near/above the target band (close to top), stop; else drive forward.
+        if y_norm <= (TARGET_Y_NORM - Y_DEADBAND):
+            fwd_cmd = 0.0
         else:
-            turn_cmd = max(-MAX_TURN_CMD, min(MAX_TURN_CMD, STEER_SIGN * K_TURN_SERVER * ang_x_deg))
-
-        # Forward
+            y_err = y_norm - TARGET_Y_NORM
+            fwd_cmd = max(MIN_FWD_CMD, min(MAX_FWD_CMD, K_FWD_Y_SERVER * y_err))
+        method = f"followY(y_norm={y_norm:.2f})"
+    elif "area_frac" in j:
+        # --- Fallback: Area-based forward control (legacy) ---
+        area_frac = float(j.get("area_frac", 0.0))
         if area_frac >= (TARGET_AREA_FRAC - TARGET_DEADBAND):
             fwd_cmd = 0.0
         else:
             area_err = TARGET_AREA_FRAC - area_frac
             fwd_cmd = max(MIN_FWD_CMD, min(MAX_FWD_CMD, K_FWD_SERVER * area_err))
+        method = f"followArea(area={area_frac:.3f})"
+    else:
+        # Only turning data; no forward motion.
+        method = "turnOnly"
 
-        # Mix tank
-        lc = fwd_cmd - turn_cmd
-        rc = fwd_cmd + turn_cmd
-        tank(lc, rc)
-        _set_moving(f"auto follow(l={lc:.2f},r={rc:.2f}; area={area_frac:.3f}, ang={ang_x_deg:.2f})")
-        _touch_vision()
-        return jsonify(ok=True, **_snapshot())
-
-    if j.get("state") == "stop":
-        stop(); _set_moving("stop"); _touch_vision()
-        return jsonify(ok=True, **_snapshot())
-
-    abort(400, "Missing or invalid vision command")
+    # Mix tank
+    lc = fwd_cmd - turn_cmd
+    rc = fwd_cmd + turn_cmd
+    tank(lc, rc)
+    _set_moving(f"auto {method} l={lc:.2f}, r={rc:.2f}, ang={ang_x_deg:.2f}")
+    _touch_vision()
+    return jsonify(ok=True, **_snapshot())
 
 # ----- frame ingest + MJPEG stream -----
 @app.route("/frame", methods=["POST"])
